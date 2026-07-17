@@ -1,4 +1,15 @@
 import { createTracing } from '@platform/tracing';
+
+const sdk = createTracing({
+  serviceName: process.env.SERVICE_NAME ?? 'dispatch-engine',
+  serviceVersion: '1.0.0',
+  collectorUrl:
+    process.env.OTEL_EXPORTER_OTLP_ENDPOINT ?? 'http://localhost:4317',
+  samplingRatio: process.env.NODE_ENV === 'development' ? 1 : 0.3,
+});
+
+sdk.start();
+
 import { httpLoggerMiddleware } from '@platform/logger';
 
 import client from 'prom-client';
@@ -8,15 +19,6 @@ const collectDefaultMetrics = client.collectDefaultMetrics;
 collectDefaultMetrics({
   prefix: 'node_app_dispatch_engine_',
 });
-
-const sdk = createTracing({
-  serviceName: 'dispatch-engine',
-  serviceVersion: '1.0.0',
-  collectorUrl: 'http://localhost:4317',
-  samplingRatio: 0.3,
-});
-
-sdk.start();
 
 import path from 'path';
 

@@ -1,0 +1,14 @@
+- Routes
+- Weight calculation
+- Dynamic weight calculations ( weight = distance _ traffic _ signals _ construction _ weather _ historical congestion _ turn penalties)
+- Shortest path
+- Fastest path
+- A\* search
+- Why Google Maps isn't just A\*
+- Contraction Hierarchies (CH)
+- Hierarchical Routing
+- Bidirectional Search
+- Alternative Routes
+- Traffic Integration
+- ETA Calculation (Modern systems often use machine learning to correct systematic errors. If the graph predicts 12 minutes but similar trips consistently take 14 minutes at 8 AM on Mondays, an ML model can adjust the prediction.)
+- Route Geometry (Polyline)

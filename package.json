@@ -16,11 +16,12 @@
   "dependencies": {
     "@asteasolutions/zod-to-openapi": "^8.4.0",
     "@core/main": "workspace:*",
+    "@platform/cache": "workspace:*",
     "@platform/logger": "workspace:*",
     "@platform/queue-rabbitmq": "workspace:*",
     "@platform/tracing": "workspace:*",
-    "@platform/cache": "workspace:*",
     "awilix": "^12.1.0",
+    "axios": "^1.13.6",
     "cors": "^2.8.6",
     "express": "^5.2.1",
     "helmet": "^8.1.0",
