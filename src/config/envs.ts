@@ -9,6 +9,10 @@ const envSchema = z.object({
     .default('development'),
   REDIS_PORT: z.string().default('6379'),
   REDIS_HOST: z.string().default('localhost'),
+  RABBITMQ_URL: z.string().default('amqp://localhost:5672'),
+  RABBITMQ_USER: z.string().optional(),
+  RABBITMQ_PASS: z.string().optional(),
+  RABBITMQ_HEARTBEAT: z.string().default('60'),
 });
 
 const _env = envSchema.safeParse(process.env);
