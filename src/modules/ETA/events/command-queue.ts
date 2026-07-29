@@ -14,7 +14,7 @@ import {
   DispatchCommandPayload,
 } from '../types/events';
 import { IEventBus } from 'src/interfaces/event-bus.interface';
-import { CacheService, GeoSearchResult } from '@platform/cache';
+import { CacheService, GeoSearchResult, ICacheService } from '@platform/cache';
 
 /**
  * Shared constant for the dispatch engine consumer queue name.
@@ -44,7 +44,7 @@ export class DispatchCommandQueue {
   constructor(
     private readonly eventBus: IEventBus,
     private readonly router: OsrmRouter,
-    private readonly cacheService: CacheService,
+    private readonly cacheService: ICacheService,
   ) {}
 
   /**

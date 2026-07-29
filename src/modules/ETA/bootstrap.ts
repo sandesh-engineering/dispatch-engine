@@ -3,6 +3,7 @@ import { DispatchCommandQueue } from './events/command-queue';
 import { OsrmRouter } from './router/osrm.router';
 import { DISPATCH_EXCHANGE } from './types/events';
 import { logger } from '@platform/logger';
+import { cacheService } from 'src/utils/cache-bootstrap';
 
 /**
  * Handle to the ETA module runtime, returned by `bootstrap()`.
@@ -33,7 +34,7 @@ export async function bootstrap(
   );
 
   const router = new OsrmRouter();
-  const commandQueue = new DispatchCommandQueue(eventBus, router);
+  const commandQueue = new DispatchCommandQueue(eventBus, router, cacheService);
 
   await commandQueue.provision();
 
