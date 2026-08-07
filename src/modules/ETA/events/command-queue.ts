@@ -15,6 +15,7 @@ import {
 } from '../types/events';
 import { IEventBus } from 'src/interfaces/event-bus.interface';
 import { CacheService, GeoSearchResult, ICacheService } from '@platform/cache';
+import { AgentAvailabilityStatus } from '../interfaces/agent.interface';
 
 /**
  * Shared constant for the dispatch engine consumer queue name.
@@ -40,6 +41,7 @@ const DISPATCH_CONSUMER_QUEUE = 'dispatch-engine.commands.queue';
  */
 export class DispatchCommandQueue {
   private provisioned = false;
+  private readonly MAX_DELIVERY_AGENT_POOL = 15;
 
   constructor(
     private readonly eventBus: IEventBus,
@@ -121,6 +123,42 @@ export class DispatchCommandQueue {
         latitude: payload.restaurant_coords.latitude,
       },
     });
+
+    /* Exclude the DA's who aren't available (Filter based on CONNECTED as well as delivery agent availability status) */
+    const nearbyDeliveryAgentSessionData = await Promise.all(
+      nearbyDeliveryAgents.map((agent) =>
+        this.cacheService.hget(`delivery-agent:${agent.member}`),
+      ),
+    );
+
+    const eligibleAgents = nearbyDeliveryAgentSessionData.filter(
+      (agentData) =>
+        agentData?.availability === AgentAvailabilityStatus.AVAILABLE,
+    );
+
+    if (eligibleAgents.length < this.MAX_DELIVERY_AGENT_POOL) {
+      const nextBatchNearbyDeliveryAgents = await this.cacheService.geoSearch(
+        'location:delivery-agents',
+        {
+          longitude: payload.restaurant_coords.longitude,
+          latitude: payload.restaurant_coords.latitude,
+        },
+        5,
+        'km',
+        { withDist: true, withCoord: true, count: 15, sort: 'ASC' },
+      );
+
+      const nextBatchNearbyDeliveryAgentSessionData = await Promise.all(
+        nextBatchNearbyDeliveryAgents.map((agent) =>
+          this.cacheService.hget(`delivery-agent:${agent.member}`),
+        ),
+      );
+
+      const eligibleAgents = nextBatchNearbyDeliveryAgentSessionData.filter(
+        (agentData) =>
+          agentData?.availability === AgentAvailabilityStatus.AVAILABLE,
+      );
+    }
 
     /* Compute routes (in a real scenario, deliveryAgentCoords would come from
        a nearby-agent lookup service; here we use a placeholder) */
