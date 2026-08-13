@@ -17,6 +17,45 @@ import { IEventBus } from 'src/interfaces/event-bus.interface';
 import { CacheService, GeoSearchResult, ICacheService } from '@platform/cache';
 import { AgentAvailabilityStatus } from '../interfaces/agent.interface';
 
+const SEARCH_LEVELS = [
+  {
+    radius: 2,
+    count: 30,
+  },
+  {
+    radius: 5,
+    count: 60,
+  },
+  {
+    radius: 10,
+    count: 120,
+  },
+] as const;
+
+type NearbyAgent = {
+  member: string;
+  distance: number;
+  coordinates: {
+    longitude: number;
+    latitude: number;
+  };
+};
+
+type AgentSession = {
+  availability: AgentAvailabilityStatus;
+  // other session fields...
+};
+
+type EligibleAgent = {
+  member: string;
+  distance: number;
+  coordinates: {
+    longitude: number;
+    latitude: number;
+  };
+  session: AgentSession;
+};
+
 /**
  * Shared constant for the dispatch engine consumer queue name.
  */
@@ -107,139 +146,183 @@ export class DispatchCommandQueue {
     }
   }
 
+  // /**
+  //  * Handle `dispatch.v1.request-creation`:
+  //  * Compute agent→restaurant→customer routes and publish `dispatch.v1.created`.
+  //  */
+  // private async handleCreateCommand(
+  //   payload: DispatchCreateCommand,
+  // ): Promise<void> {
+  //   const dispatchId = randomUUID();
+
+  //   /* Get all of the delivery agents within the 2KM radius of the restaurant and if there are none then increase the radius to 5KM and max 7KM for 3 times and if no delivery agents are there then publish the cancel event */
+  //   const nearbyDeliveryAgents = await this.getNearbyDeliveryAgents({
+  //     restaurantCoords: {
+  //       longitude: payload.restaurant_coords.longitude,
+  //       latitude: payload.restaurant_coords.latitude,
+  //     },
+  //   });
+
+  //   /* Exclude the DA's who aren't available (Filter based on CONNECTED as well as delivery agent availability status) */
+  //   const nearbyDeliveryAgentSessionData = await Promise.all(
+  //     nearbyDeliveryAgents.map((agent) =>
+  //       this.cacheService.hget(`delivery-agent:${agent.member}`),
+  //     ),
+  //   );
+
+  //   const eligibleAgents = nearbyDeliveryAgentSessionData.filter(
+  //     (agentData) =>
+  //       agentData?.availability === AgentAvailabilityStatus.AVAILABLE,
+  //   );
+
+  //   if (eligibleAgents.length < this.MAX_DELIVERY_AGENT_POOL) {
+  //     const nextBatchNearbyDeliveryAgents = await this.cacheService.geoSearch(
+  //       'location:delivery-agents',
+  //       {
+  //         longitude: payload.restaurant_coords.longitude,
+  //         latitude: payload.restaurant_coords.latitude,
+  //       },
+  //       5,
+  //       'km',
+  //       { withDist: true, withCoord: true, count: 15, sort: 'ASC' },
+  //     );
+
+  //     const nextBatchNearbyDeliveryAgentSessionData = await Promise.all(
+  //       nextBatchNearbyDeliveryAgents.map((agent) =>
+  //         this.cacheService.hget(`delivery-agent:${agent.member}`),
+  //       ),
+  //     );
+
+  //     const eligibleAgents = nextBatchNearbyDeliveryAgentSessionData.filter(
+  //       (agentData) =>
+  //         agentData?.availability === AgentAvailabilityStatus.AVAILABLE,
+  //     );
+  //   }
+
+  //   /* Compute routes (in a real scenario, deliveryAgentCoords would come from
+  //      a nearby-agent lookup service; here we use a placeholder) */
+  //   const routesResult = await Promise.allSettled(
+  //     nearbyDeliveryAgents.map((nda) =>
+  //       this.router.getRoutes({
+  //         restaurantCoords: {
+  //           longitude: payload.restaurant_coords.longitude,
+  //           latitude: payload.restaurant_coords.latitude,
+  //         },
+  //         customerCoords: {
+  //           longitude: payload.customer_coords.longitude,
+  //           latitude: payload.customer_coords.latitude,
+  //         },
+  //         deliveryAgentCoords: {
+  //           longitude: nda.coordinates.latitude,
+  //           latitude: nda.coordinates.longitude,
+  //         },
+  //       }),
+  //     ),
+  //   );
+
+  //   /* Extract ETA from OSRM response */
+  //   const agentToRestaurant = routesResult.map((routeRes) => {
+  //     if (routeRes.status === 'rejected') {
+  //       logger.warn('Failed to fetch route for delivery agent', {
+  //         reason: routeRes.reason,
+  //       });
+
+  //       return;
+  //     }
+
+  //     if (routeRes.status === 'fulfilled')
+  //       return this.extractRouteSummary(
+  //         routeRes.value.agentToRestaurantResponse,
+  //       );
+  //   });
+
+  //   const restaurantToCustomer = routesResult.map((routeRes) => {
+  //     if (routeRes.status === 'rejected') {
+  //       logger.warn('Failed to fetch route for delivery agent', {
+  //         reason: routeRes.reason,
+  //       });
+  //       return;
+  //     }
+
+  //     if (routeRes.status === 'fulfilled')
+  //       return this.extractRouteSummary(
+  //         routeRes.value.restaurantToCustomerResponse,
+  //       );
+  //   });
+
+  //   /* Now compare and find out the ETA for all of these DAs */
+  //   logger.log('Agent to restaurant', agentToRestaurant);
+  //   logger.log('Restaurant to customer', restaurantToCustomer);
+
+  //   // const event: DispatchCreatedEvent = {
+  //   //   dispatch_id: dispatchId,
+  //   //   order_id: payload.order_id,
+  //   //   agent_to_restaurant: {
+  //   //     distance_meters: agentToRestaurant.distance,
+  //   //     duration_seconds: agentToRestaurant.duration,
+  //   //     polyline: agentToRestaurant.geometry,
+  //   //   },
+  //   //   restaurant_to_customer: {
+  //   //     distance_meters: restaurantToCustomer.distance,
+  //   //     duration_seconds: restaurantToCustomer.duration,
+  //   //     polyline: restaurantToCustomer.geometry,
+  //   //   },
+  //   //   total_eta_seconds:
+  //   //     agentToRestaurant.duration + restaurantToCustomer.duration,
+  //   //   created_at: new Date().toISOString(),
+  //   // };
+
+  //   // await this.eventBus.publish(DISPATCH_EVENTS.CREATED, event);
+
+  //   // logger.info('Published dispatch.v1.created', {
+  //   //   dispatch_id: dispatchId,
+  //   //   order_id: payload.order_id,
+  //   //   total_eta_seconds: event.total_eta_seconds,
+  //   // });
+  // }
+
   /**
-   * Handle `dispatch.v1.request-creation`:
-   * Compute agent→restaurant→customer routes and publish `dispatch.v1.created`.
+   * Handle `dispatch.v1.request-creation`.
+   *
+   * @remarks
+   * - Delegates candidate discovery, route resolution, and ETA calculation
+   *   to their respective components.
+   * - The command handler is responsible only for command-level orchestration
+   *   and dispatch event publication.
+   *
+   * @param {DispatchCreateCommand} payload - Dispatch creation command.
+   * @returns {Promise<void>} Resolves when dispatch creation processing completes.
+   *
+   * @example
+   * ```ts
+   * await this.handleCreateCommand(payload);
+   * ```
    */
   private async handleCreateCommand(
     payload: DispatchCreateCommand,
   ): Promise<void> {
     const dispatchId = randomUUID();
 
-    /* Get all of the delivery agents within the 2KM radius of the restaurant and if there are none then increase the radius to 5KM and max 7KM for 3 times and if no delivery agents are there then publish the cancel event */
-    const nearbyDeliveryAgents = await this.getNearbyDeliveryAgents({
+    const result = await this.etaService.calculateForDispatch({
       restaurantCoords: {
         longitude: payload.restaurant_coords.longitude,
         latitude: payload.restaurant_coords.latitude,
       },
+      customerCoords: {
+        longitude: payload.customer_coords.longitude,
+        latitude: payload.customer_coords.latitude,
+      },
     });
 
-    /* Exclude the DA's who aren't available (Filter based on CONNECTED as well as delivery agent availability status) */
-    const nearbyDeliveryAgentSessionData = await Promise.all(
-      nearbyDeliveryAgents.map((agent) =>
-        this.cacheService.hget(`delivery-agent:${agent.member}`),
-      ),
-    );
-
-    const eligibleAgents = nearbyDeliveryAgentSessionData.filter(
-      (agentData) =>
-        agentData?.availability === AgentAvailabilityStatus.AVAILABLE,
-    );
-
-    if (eligibleAgents.length < this.MAX_DELIVERY_AGENT_POOL) {
-      const nextBatchNearbyDeliveryAgents = await this.cacheService.geoSearch(
-        'location:delivery-agents',
-        {
-          longitude: payload.restaurant_coords.longitude,
-          latitude: payload.restaurant_coords.latitude,
-        },
-        5,
-        'km',
-        { withDist: true, withCoord: true, count: 15, sort: 'ASC' },
-      );
-
-      const nextBatchNearbyDeliveryAgentSessionData = await Promise.all(
-        nextBatchNearbyDeliveryAgents.map((agent) =>
-          this.cacheService.hget(`delivery-agent:${agent.member}`),
-        ),
-      );
-
-      const eligibleAgents = nextBatchNearbyDeliveryAgentSessionData.filter(
-        (agentData) =>
-          agentData?.availability === AgentAvailabilityStatus.AVAILABLE,
-      );
+    if (result.length === 0) {
+      // Publish cancellation / no-candidate event.
+      return;
     }
 
-    /* Compute routes (in a real scenario, deliveryAgentCoords would come from
-       a nearby-agent lookup service; here we use a placeholder) */
-    const routesResult = await Promise.allSettled(
-      nearbyDeliveryAgents.map((nda) =>
-        this.router.getRoutes({
-          restaurantCoords: {
-            longitude: payload.restaurant_coords.longitude,
-            latitude: payload.restaurant_coords.latitude,
-          },
-          customerCoords: {
-            longitude: payload.customer_coords.longitude,
-            latitude: payload.customer_coords.latitude,
-          },
-          deliveryAgentCoords: {
-            longitude: nda.coordinates.latitude,
-            latitude: nda.coordinates.longitude,
-          },
-        }),
-      ),
-    );
-
-    /* Extract ETA from OSRM response */
-    const agentToRestaurant = routesResult.map((routeRes) => {
-      if (routeRes.status === 'rejected') {
-        logger.warn('Failed to fetch route for delivery agent', {
-          reason: routeRes.reason,
-        });
-
-        return;
-      }
-
-      if (routeRes.status === 'fulfilled')
-        return this.extractRouteSummary(
-          routeRes.value.agentToRestaurantResponse,
-        );
-    });
-
-    const restaurantToCustomer = routesResult.map((routeRes) => {
-      if (routeRes.status === 'rejected') {
-        logger.warn('Failed to fetch route for delivery agent', {
-          reason: routeRes.reason,
-        });
-        return;
-      }
-
-      if (routeRes.status === 'fulfilled')
-        return this.extractRouteSummary(
-          routeRes.value.restaurantToCustomerResponse,
-        );
-    });
-
-    /* Now compare and find out the ETA for all of these DAs */
-    logger.log('Agent to restaurant', agentToRestaurant);
-    logger.log('Restaurant to customer', restaurantToCustomer);
-
-    // const event: DispatchCreatedEvent = {
-    //   dispatch_id: dispatchId,
-    //   order_id: payload.order_id,
-    //   agent_to_restaurant: {
-    //     distance_meters: agentToRestaurant.distance,
-    //     duration_seconds: agentToRestaurant.duration,
-    //     polyline: agentToRestaurant.geometry,
-    //   },
-    //   restaurant_to_customer: {
-    //     distance_meters: restaurantToCustomer.distance,
-    //     duration_seconds: restaurantToCustomer.duration,
-    //     polyline: restaurantToCustomer.geometry,
-    //   },
-    //   total_eta_seconds:
-    //     agentToRestaurant.duration + restaurantToCustomer.duration,
-    //   created_at: new Date().toISOString(),
-    // };
-
-    // await this.eventBus.publish(DISPATCH_EVENTS.CREATED, event);
-
-    // logger.info('Published dispatch.v1.created', {
-    //   dispatch_id: dispatchId,
-    //   order_id: payload.order_id,
-    //   total_eta_seconds: event.total_eta_seconds,
-    // });
+    // Later:
+    // rank candidates
+    // create dispatch
+    // publish dispatch.v1.created
   }
 
   /**

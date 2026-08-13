@@ -19,7 +19,7 @@ export { RabbitMQBus, RabbitMQBusConfig } from './events/rabbitmq.bus';
 export { DispatchCommandQueue } from './events/command-queue';
 
 export { OsrmRouter } from './router/osrm.router';
-export { IRouteResolutionRouter } from './interfaces/router.interface';
+export { IRouteResolutionRouter } from '../route-discovery/interfaces/router.interface';
 
 export {
   DISPATCH_COMMANDS,
@@ -34,3 +34,5 @@ export {
   DispatchCommandPayload,
   DispatchEventPayload,
 } from './types/events';
+
+export { AgentAvailabilityStatus } from './interfaces/agent.interface';
