@@ -1,9 +1,12 @@
+import { Coordinates } from 'src/modules/candidate-discovery';
+
 /**
  * Properties that the agent will have inorder to be ranked
  */
 export type RankableAgent = {
   id: string;
   rating: number;
+  coordinates: Coordinates;
   cancellationRatio: number;
   quota: {
     used: number;
