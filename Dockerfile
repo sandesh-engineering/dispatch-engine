@@ -21,6 +21,7 @@ FROM base AS installer
 
 COPY --from=pruner /app/out/json/ .
 COPY --from=pruner /app/out/pnpm-lock.yaml ./pnpm-lock.yaml
+COPY --from=pruner /app/turbo.json ./turbo.json
 
 RUN pnpm install --frozen-lockfile
 
