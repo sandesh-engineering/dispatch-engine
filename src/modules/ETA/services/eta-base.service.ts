@@ -7,6 +7,7 @@ import {
 import { IRouteMatrixResolver } from 'src/modules/route-discovery/interfaces/router.interface';
 import { EtaConfig } from '../interfaces/eta.interface';
 import { AgentRankingService, RankableAgent } from 'src/modules/ranking';
+import { STATIC_RANKING_CONFIG } from 'src/modules/ranking/constants/ranking.config';
 import { CandidatesFromMatrix } from '../types/eta.types';
 import { EtaAggregatorService } from './eta-aggregator.service';
 
@@ -26,18 +27,6 @@ export interface AgentEtaResult {
 }
 
 export class EtaService {
-  /* NEEDS TO BE REMOVED AND DERIVED FROM THE DATA LAYER ELSE EVERY DA WILL GET THE SAME THING */
-  private readonly RANKING_CONFIG = {
-    weights: {
-      rating: 4.2,
-      cancellationRatio: 2,
-      quota: 20,
-      distance: 5,
-    },
-    maxDistanceKm: 10,
-    batchSize: 50,
-  };
-
   constructor(
     private readonly routeMatrixResolver: IRouteMatrixResolver,
     private readonly config: EtaConfig,
@@ -45,6 +34,57 @@ export class EtaService {
     private readonly candidateDiscovery: ProgressiveCandidateDiscovery,
     private readonly rankingService: AgentRankingService,
   ) {}
+
+  /**
+   * Map an EligibleAgent (from Redis GEO discovery) into a RankableAgent.
+   *
+   * Rating, cancellationRatio, and quota are defaulted since no driver-profile
+   * data source is available in V1. Distance comes from Redis GEO.
+   */
+  mapToRankable(agent: EligibleAgent): RankableAgent {
+    return {
+      id: agent.member,
+      coordinates: agent.coordinates,
+      distanceKm: agent.distance,
+      // Defaulted until a driver-profile data source is integrated
+      rating: 4.5,
+      cancellationRatio: 0.05,
+      quota: { used: 0, limit: 10 },
+    };
+  }
+
+  /**
+   * Discover candidates and rank them.
+   * Returns a RankingResult with the full ranked list; callers iterate batches.
+   */
+  async discoverAndRank(restaurantCoords: Coordinates) {
+    /* Getting the nearby delivery agents via Redis GEO */
+    const agents = await this.candidateDiscovery.discover(restaurantCoords);
+
+    logger.debug('Nearby delivery agents', { count: agents.length });
+
+    if (agents.length === 0) {
+      return null;
+    }
+
+    /* Map EligibleAgent[] → RankableAgent[] */
+    const rankableAgents: RankableAgent[] = agents.map((agent) =>
+      this.mapToRankable(agent),
+    );
+
+    /* Rank using static config */
+    const rankedResult = this.rankingService.rank(
+      rankableAgents,
+      STATIC_RANKING_CONFIG,
+    );
+
+    logger.debug('Agents ranked', {
+      total: rankedResult.totalAgents,
+      batchSize: STATIC_RANKING_CONFIG.batchSize,
+    });
+
+    return rankedResult;
+  }
 
   /**
    * Calculate route candidates for a ranked delivery-agent batch.
@@ -60,46 +100,17 @@ export class EtaService {
    * @param {Coordinates} customerCoords - Customer coordinates.
    * @returns {Promise<CandidatesFromMatrix[]>} Route candidates satisfying the
    * configured ETA and distance thresholds.
-   *
-   * @example
-   * ```ts
-   * const candidates = await etaService.calculate(
-   *   rankedAgents,
-   *   restaurantCoords,
-   *   customerCoords,
-   * );
-   * ```
    */
-  async calculateForDispatch(
+  async calculate(
+    agents: RankableAgent[],
     restaurantCoords: Coordinates,
     customerCoords: Coordinates,
   ): Promise<CandidatesFromMatrix[]> {
-    /* Getting the nearby delivery agents */
-    const agents = await this.candidateDiscovery.discover(restaurantCoords);
-
-    logger.debug('Nearby delivery agents', { agents });
-
-    if (agents.length === 0) {
-      logger.warn('Missing agents list', {
-        agent_count: agents.length,
-      });
-      return [];
-    }
-
-    /* Enhancing the delivery agents meta (Nothing since this is derived from the data layer after we integrate everything) */
-    const enhancedAgentMetadata = [];
-
-    /* Ranking the obtained candidates (Static config is used until things get in line for the command queue) */
-    const rankedAgents = this.rankingService.rank(
-      enhancedAgentMetadata,
-      this.RANKING_CONFIG,
-    );
-
-    logger.debug('Ranked delivery agents obtained');
+    if (agents.length === 0) return [];
 
     /* Getting the total distance as well as time between DA to Restro as well as Restro to Customer from OSRM table matrix */
     const routeMatrix = await this.routeMatrixResolver.resolve(
-      rankedAgents.nextBatch(),
+      agents,
       restaurantCoords,
       customerCoords,
     );
@@ -114,7 +125,7 @@ export class EtaService {
 
     /* Adding agents to map for efficient lookups */
     const agentsById = new Map<string, RankableAgent>(
-      rankedAgents.nextBatch().map((agent) => [agent.id, agent]),
+      agents.map((agent) => [agent.id, agent]),
     );
 
     /* Distance from restaurant to customer */
@@ -163,20 +174,26 @@ export class EtaService {
   }
 
   /**
+   * Legacy convenience method: discover → rank → first batch → calculate.
+   * Kept for backward compatibility. Prefer `discoverAndRank` + `calculate` separately.
+   */
+  async calculateForDispatch(
+    restaurantCoords: Coordinates,
+    customerCoords: Coordinates,
+  ): Promise<CandidatesFromMatrix[]> {
+    const rankedResult = await this.discoverAndRank(restaurantCoords);
+
+    if (!rankedResult) {
+      logger.warn('No agents available for dispatch', { restaurantCoords });
+      return [];
+    }
+
+    const firstBatch = rankedResult.nextBatch();
+    return this.calculate(firstBatch, restaurantCoords, customerCoords);
+  }
+
+  /**
    * Determine whether a route candidate satisfies ETA constraints.
-   *
-   * @remarks
-   * - A candidate must satisfy both distance and ETA limits.
-   *
-   * @param {CandidatesFromMatrix} candidate - Candidate being evaluated.
-   * @returns {boolean} Whether the candidate satisfies configured limits.
-   *
-   * @example
-   * ```ts
-   * if (this.isWithinThreshold(candidate)) {
-   *   // Candidate is viable.
-   * }
-   * ```
    */
   private isWithinThreshold(candidate: CandidatesFromMatrix): boolean {
     return (

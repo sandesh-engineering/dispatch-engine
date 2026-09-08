@@ -12,7 +12,14 @@
     "build": "tsc && tsc-alias",
     "start": "node dist/src/server.js",
     "lint": "eslint src",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "typeorm": "ts-node --transpile-only -r tsconfig-paths/register ./node_modules/typeorm/cli.js -d src/database/data-source.ts",
+    "migration:generate": "pnpm run typeorm migration:generate",
+    "migration:create": "pnpm run typeorm migration:create",
+    "migration:run": "pnpm run typeorm migration:run",
+    "migration:revert": "pnpm run typeorm migration:revert",
+    "typeorm:prod": "node ./node_modules/typeorm/cli.js -d dist/src/database/data-source.js",
+    "start:prod": "pnpm migration:run && pnpm start"
   },
   "dependencies": {
     "@asteasolutions/zod-to-openapi": "^8.4.0",
