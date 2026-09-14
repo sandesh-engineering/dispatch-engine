@@ -1,0 +1,8 @@
+export enum OfferStatus {
+  PENDING = 'PENDING',
+  OFFERED = 'OFFERED',
+  ACCEPTED = 'ACCEPTED',
+  REJECTED = 'REJECTED',
+  TIMED_OUT = 'TIMED_OUT',
+  CANCELLED = 'CANCELLED',
+}

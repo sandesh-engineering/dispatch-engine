@@ -9,6 +9,7 @@ import {
 import { IRouteMatrixResolver } from 'src/modules/route-discovery/interfaces/router.interface';
 import { EtaConfig } from '../interfaces/eta.interface';
 import { AgentRankingService, RankableAgent } from 'src/modules/ranking';
+import { STATIC_RANKING_CONFIG } from 'src/modules/ranking/constants/ranking.config';
 import { CandidatesFromMatrix } from '../types/eta.types';
 import { EtaAggregatorService } from './eta-aggregator.service';
 import { DispatchRepository } from 'src/repositories/dispatch.repository';
@@ -50,7 +51,8 @@ export class EtaService {
   /**
    * Calculate route candidates and persist dispatch state + candidate records.
    */
-  async calculateForDispatch(
+  async calculate(
+    agents: RankableAgent[],
     restaurantCoords: Coordinates,
     customerCoords: Coordinates,
     orderId?: string,

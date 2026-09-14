@@ -33,6 +33,7 @@ export interface EtaModuleHandle {
  */
 export async function bootstrap(
   config: RabbitMQBusConfig,
+  dataSource: DataSource,
 ): Promise<EtaModuleHandle> {
   logger.info('Bootstrapping ETA module...');
 

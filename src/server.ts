@@ -8,6 +8,14 @@ let isShuttingDown = false;
 
 (async () => {
   try {
+    /* Initialize TypeORM DataSource */
+    logger.info('Initializing TypeORM DataSource...');
+    await datasource.initialize();
+    logger.info('TypeORM DataSource initialized successfully', {
+      database: env.DB_NAME ?? '(env DB_NAME not set)',
+      host: env.DB_HOST,
+    });
+
     app.listen(env.PORT, () => {
       logger.info(`Server is running in port ${env.PORT}!`);
     });
@@ -15,12 +23,15 @@ let isShuttingDown = false;
     /* Bootstrap the ETA module — connects RabbitMQ, provisions the command queue */
     logger.info('Initializing ETA module...');
 
-    etaModule = await bootstrap({
-      url: env.RABBITMQ_URL,
-      username: env.RABBITMQ_USER,
-      password: env.RABBITMQ_PASS,
-      heartbeat: Number(env.RABBITMQ_HEARTBEAT),
-    });
+    etaModule = await bootstrap(
+      {
+        url: env.RABBITMQ_URL,
+        username: env.RABBITMQ_USER,
+        password: env.RABBITMQ_PASS,
+        heartbeat: Number(env.RABBITMQ_HEARTBEAT),
+      },
+      datasource,
+    );
 
     logger.info('ETA module initialized successfully');
   } catch (error) {
@@ -56,6 +67,12 @@ async function shutdown(signal: string): Promise<void> {
   try {
     if (etaModule) {
       await etaModule.destroy();
+    }
+
+    /* Gracefully close TypeORM DataSource */
+    if (datasource.isInitialized) {
+      await datasource.destroy();
+      logger.info('TypeORM DataSource closed.');
     }
 
     logger.info('Graceful shutdown completed.');

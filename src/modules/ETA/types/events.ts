@@ -6,6 +6,7 @@ export const DISPATCH_COMMANDS = {
   REQUEST_CREATION: 'dispatch.v1.request-creation',
   REQUEST_AGENT_SELECTION: 'dispatch.v1.request-agent-selection',
   CONFIRM_AGENT_ASSIGNMENT: 'dispatch.v1.confirm-agent-assignment',
+  OFFER_RESPONSE: 'dispatch.v1.offer-response',
 } as const;
 
 /**
@@ -61,24 +62,24 @@ export interface DispatchAgentAssignmentCommand {
 
 /**
  * Payload for `dispatch.v1.created` event.
- * Published after routes and ETA have been computed.
+ * Published after the first batch of candidates is evaluated via OSRM Table.
+ * Carries pre-trip ETA derived from Table results; no live-ETA computation.
  */
 export interface DispatchCreatedEvent {
   dispatch_id: string;
   order_id: string;
-  agent_to_restaurant: {
-    distance_meters: number;
-    duration_seconds: number;
-    polyline: unknown;
-  };
+  /** Pre-trip ETA for the best candidate in the first batch (driver → restaurant) */
+  driver_to_restaurant_eta_seconds: number;
+  /** Shared restaurant → customer leg */
   restaurant_to_customer: {
     distance_meters: number;
     duration_seconds: number;
-    polyline: unknown;
   };
+  /** Total pre-trip ETA = driver_to_restaurant + restaurant_to_customer */
   total_eta_seconds: number;
   created_at: string;
 }
+
 
 /**
  * Payload for `agent.v1.notified` event.
@@ -103,12 +104,25 @@ export interface AgentAssignedEvent {
 }
 
 /**
+ * Payload for `dispatch.v1.offer-response`.
+ * Sent by a driver (via gateway) to accept or reject a dispatch offer.
+ */
+export interface OfferResponseCommand {
+  dispatch_id: string;
+  order_id: string;
+  agent_id: string;
+  batch_number: number;
+  response: 'ACCEPT' | 'REJECT';
+}
+
+/**
  * Union type of all dispatch command payloads.
  */
 export type DispatchCommandPayload =
   | DispatchCreateCommand
   | DispatchAgentSelectionCommand
-  | DispatchAgentAssignmentCommand;
+  | DispatchAgentAssignmentCommand
+  | OfferResponseCommand;
 
 /**
  * Union type of all dispatch event payloads.
