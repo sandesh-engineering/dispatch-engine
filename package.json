@@ -12,6 +12,7 @@
     "build": "tsc && tsc-alias",
     "start": "node dist/src/server.js",
     "lint": "eslint src",
+    "typecheck": "tsc --noEmit",
     "simulate": "ts-node -r tsconfig-paths/register src/simulation/run-dispatch.ts",
     "typeorm": "typeorm-ts-node-commonjs",
     "typeorm:migration:generate": "typeorm-ts-node-commonjs migration:generate -d src/database/data-source.ts",
