@@ -33,6 +33,7 @@ export const DISPATCH_EXCHANGE = {
  */
 export interface DispatchCreateCommand {
   order_id: string;
+  restaurant_id: string;
   restaurant_coords: { latitude: number; longitude: number };
   customer_coords: { latitude: number; longitude: number };
 }

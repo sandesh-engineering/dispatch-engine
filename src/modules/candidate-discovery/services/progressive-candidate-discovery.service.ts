@@ -7,7 +7,7 @@ import {
   NearbyAgent,
 } from '../types/candidate-discovery.type';
 import { CandidateDiscoveryStrategy } from '../interfaces/candidate-discovery.interface';
-import { AgentAvailabilityStatus } from 'src/modules/ETA';
+import { AgentAvailabilityStatus } from 'src/modules/eta';
 
 /**
  * Performs bounded search where we stop whenever our stopping condition is fulfilled

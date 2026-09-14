@@ -19,6 +19,7 @@ export interface IRouteResolutionRouter {
 export interface TravelEstimate {
   distanceMeters: number;
   durationSeconds: number;
+  geometry?: string;
 }
 
 export interface AgentRouteEstimate {

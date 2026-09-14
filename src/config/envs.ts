@@ -13,6 +13,11 @@ const envSchema = z.object({
   RABBITMQ_USER: z.string().optional(),
   RABBITMQ_PASS: z.string().optional(),
   RABBITMQ_HEARTBEAT: z.string().default('60'),
+  DB_HOST: z.string().default('localhost'),
+  DB_PORT: z.string().default('5432'),
+  DB_USERNAME: z.string().default('postgres'),
+  DB_PASSWORD: z.string().default('postgres'),
+  DB_NAME: z.string().default('dispatch_db'),
 });
 
 const _env = envSchema.safeParse(process.env);

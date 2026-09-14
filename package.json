@@ -11,7 +11,11 @@
     "dev": "ts-node-dev --respawn -r tsconfig-paths/register --poll src/server.ts",
     "build": "tsc && tsc-alias",
     "start": "node dist/src/server.js",
-    "lint": "eslint src"
+    "lint": "eslint src",
+    "simulate": "ts-node -r tsconfig-paths/register src/simulation/run-dispatch.ts",
+    "typeorm": "typeorm-ts-node-commonjs",
+    "typeorm:migration:generate": "typeorm-ts-node-commonjs migration:generate -d src/database/data-source.ts",
+    "typeorm:migration:run": "typeorm-ts-node-commonjs migration:run -d src/database/data-source.ts"
   },
   "dependencies": {
     "@asteasolutions/zod-to-openapi": "^8.4.0",

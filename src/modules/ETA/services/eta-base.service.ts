@@ -1,4 +1,6 @@
+import { randomUUID } from 'crypto';
 import { logger } from '@platform/logger';
+import { DataSource } from 'typeorm';
 import {
   Coordinates,
   EligibleAgent,
@@ -9,6 +11,12 @@ import { EtaConfig } from '../interfaces/eta.interface';
 import { AgentRankingService, RankableAgent } from 'src/modules/ranking';
 import { CandidatesFromMatrix } from '../types/eta.types';
 import { EtaAggregatorService } from './eta-aggregator.service';
+import { DispatchRepository } from 'src/repositories/dispatch.repository';
+import { DispatchCandidatesRepository } from 'src/repositories/dispatch-candidates.repository';
+import { DispatchConfigService } from 'src/services/dispatch-config.service';
+import { DispatchEntity, DispatchStatus } from 'src/entities/dispatch.entity';
+import { CandidateOfferStatus } from 'src/entities/dispatch-candidate.entity';
+import { DriverMetadataResolver } from './driver-metadata.resolver';
 
 export interface AgentEtaResult {
   agent: EligibleAgent;
@@ -26,98 +34,100 @@ export interface AgentEtaResult {
 }
 
 export class EtaService {
-  /* NEEDS TO BE REMOVED AND DERIVED FROM THE DATA LAYER ELSE EVERY DA WILL GET THE SAME THING */
-  private readonly RANKING_CONFIG = {
-    weights: {
-      rating: 4.2,
-      cancellationRatio: 2,
-      quota: 20,
-      distance: 5,
-    },
-    maxDistanceKm: 10,
-    batchSize: 50,
-  };
-
   constructor(
     private readonly routeMatrixResolver: IRouteMatrixResolver,
     private readonly config: EtaConfig,
     private readonly etaAggregator: EtaAggregatorService,
     private readonly candidateDiscovery: ProgressiveCandidateDiscovery,
     private readonly rankingService: AgentRankingService,
+    private readonly dataSource: DataSource,
+    private readonly dispatchRepo: DispatchRepository,
+    private readonly candidatesRepo: DispatchCandidatesRepository,
+    private readonly configService: DispatchConfigService,
+    private readonly driverMetadataResolver: DriverMetadataResolver,
   ) {}
 
   /**
-   * Calculate route candidates for a ranked delivery-agent batch.
-   *
-   * @remarks
-   * - Resolves all agent routes using the configured route matrix resolver.
-   * - Calculates total distance and ETA for each agent.
-   * - Removes candidates exceeding the configured ETA or distance thresholds.
-   * - Does not perform candidate discovery, ranking, or acceptance.
-   *
-   * @param {RankableAgent[]} agents - Ranked delivery agents to evaluate.
-   * @param {Coordinates} restaurantCoords - Restaurant coordinates.
-   * @param {Coordinates} customerCoords - Customer coordinates.
-   * @returns {Promise<CandidatesFromMatrix[]>} Route candidates satisfying the
-   * configured ETA and distance thresholds.
-   *
-   * @example
-   * ```ts
-   * const candidates = await etaService.calculate(
-   *   rankedAgents,
-   *   restaurantCoords,
-   *   customerCoords,
-   * );
-   * ```
+   * Calculate route candidates and persist dispatch state + candidate records.
    */
   async calculateForDispatch(
     restaurantCoords: Coordinates,
     customerCoords: Coordinates,
-  ): Promise<CandidatesFromMatrix[]> {
-    /* Getting the nearby delivery agents */
+    orderId?: string,
+    restaurantId?: string,
+  ): Promise<{ dispatch: DispatchEntity; candidates: CandidatesFromMatrix[] }> {
+    const runtimeConfig = await this.configService.getConfig();
+
+    const effectiveOrderId = orderId ?? `order-${randomUUID()}`;
+    const effectiveRestaurantId = restaurantId ?? 'restaurant-default';
+
+    /* Create dispatch record in SEARCHING status */
+    const dispatch = await this.dispatchRepo.createDispatch({
+      orderId: effectiveOrderId,
+      restaurantId: effectiveRestaurantId,
+      restaurantCoords,
+      customerCoords,
+      status: DispatchStatus.SEARCHING,
+      currentBatch: 1,
+      attemptCount: 1,
+    });
+
+    /* Getting nearby delivery agents from Redis */
     const agents = await this.candidateDiscovery.discover(restaurantCoords);
 
-    logger.debug('Nearby delivery agents', { agents });
+    logger.debug('Nearby delivery agents', { count: agents.length });
 
     if (agents.length === 0) {
-      logger.warn('Missing agents list', {
-        agent_count: agents.length,
-      });
-      return [];
+      logger.warn('No delivery agents found nearby', { orderId: effectiveOrderId });
+
+      dispatch.status = DispatchStatus.FAILED;
+      dispatch.failureReason = 'NO_ELIGIBLE_AGENTS';
+      await this.dispatchRepo.save(dispatch);
+
+      return { dispatch, candidates: [] };
     }
 
-    /* Enhancing the delivery agents meta (Nothing since this is derived from the data layer after we integrate everything) */
-    const enhancedAgentMetadata = [];
-
-    /* Ranking the obtained candidates (Static config is used until things get in line for the command queue) */
-    const rankedAgents = this.rankingService.rank(
-      enhancedAgentMetadata,
-      this.RANKING_CONFIG,
+    /* Dynamically resolve driver metrics from Redis or default fallback */
+    const rankableAgents: RankableAgent[] = await Promise.all(
+      agents.map(async (a) => {
+        const meta = await this.driverMetadataResolver.resolve(a.member);
+        return {
+          id: a.member,
+          rating: meta.rating,
+          cancellationRatio: meta.cancellationRatio,
+          quota: meta.quota,
+          distanceKm: a.distance / 1000,
+          coordinates: a.coordinates,
+        };
+      }),
     );
 
-    logger.debug('Ranked delivery agents obtained');
+    /* Rank candidate agents using dynamic config weights */
+    const rankedAgentsBatch = this.rankingService.rank(rankableAgents, {
+      weights: runtimeConfig.rankingWeights,
+      maxDistanceKm: runtimeConfig.maxDistanceKm,
+      batchSize: runtimeConfig.candidatePoolSize,
+    });
 
-    /* Getting the total distance as well as time between DA to Restro as well as Restro to Customer from OSRM table matrix */
+    const evaluatedAgents = rankedAgentsBatch.nextBatch();
+
+    /* Resolve OSRM route matrix */
     const routeMatrix = await this.routeMatrixResolver.resolve(
-      rankedAgents.nextBatch(),
+      evaluatedAgents,
       restaurantCoords,
       customerCoords,
     );
 
-    logger.debug('Distance matrix derived', {
-      agents_count: routeMatrix.agents.length,
-      restaurantToCustomerDistance:
-        routeMatrix.restaurantToCustomer.distanceMeters,
-      restaurantToCustomerDuration:
-        routeMatrix.restaurantToCustomer.durationSeconds,
-    });
+    /* Update restaurant-to-customer shared ETA on dispatch entity */
+    dispatch.restaurantToCustomerEtaSeconds = Math.round(
+      routeMatrix.restaurantToCustomer.durationSeconds,
+    );
+    await this.dispatchRepo.save(dispatch);
 
-    /* Adding agents to map for efficient lookups */
     const agentsById = new Map<string, RankableAgent>(
-      rankedAgents.nextBatch().map((agent) => [agent.id, agent]),
+      evaluatedAgents.map((agent) => [agent.id, agent]),
     );
 
-    /* Distance from restaurant to customer */
     const restaurantToCustomer = routeMatrix.restaurantToCustomer;
 
     const candidates = routeMatrix.agents
@@ -131,12 +141,10 @@ export class EtaService {
           return null;
         }
 
-        /* Total distance from agent to restro and restro to customer */
         const totalDistanceMeters =
           agentRoute.agentToRestaurant.distanceMeters +
           restaurantToCustomer.distanceMeters;
 
-        /* Total time in seconds from agent to restro and restro to customer */
         const totalEtaSeconds =
           agentRoute.agentToRestaurant.durationSeconds +
           restaurantToCustomer.durationSeconds;
@@ -149,8 +157,12 @@ export class EtaService {
           totalEtaSeconds,
         };
       })
-      .filter((candidate) => candidate !== null)
-      .filter((candidate) => this.isWithinThreshold(candidate));
+      .filter((candidate): candidate is CandidatesFromMatrix => candidate !== null)
+      .filter(
+        (candidate) =>
+          candidate.totalDistanceMeters <= runtimeConfig.maxTotalDistanceMeters &&
+          candidate.totalEtaSeconds <= runtimeConfig.maxTotalEtaSeconds,
+      );
 
     logger.info(
       'Route candidates satisfying the configured ETA and distance thresholds.',
@@ -159,29 +171,23 @@ export class EtaService {
       },
     );
 
-    return candidates;
-  }
+    /* Persist candidate records to DB */
+    if (candidates.length > 0) {
+      const candidateEntities = candidates.map((c, index) => ({
+        dispatchId: dispatch.id,
+        driverId: c.agent.id,
+        batchNumber: Math.floor(index / runtimeConfig.batchSize) + 1,
+        redisDistanceMeters: Math.round(c.agent.distanceKm * 1000),
+        osrmDistanceMeters: c.agentToRestaurant.distanceMeters,
+        osrmDurationSeconds: c.agentToRestaurant.durationSeconds,
+        preEtaSeconds: c.totalEtaSeconds,
+        rankingScore: null,
+        offerStatus: CandidateOfferStatus.PENDING,
+      }));
 
-  /**
-   * Determine whether a route candidate satisfies ETA constraints.
-   *
-   * @remarks
-   * - A candidate must satisfy both distance and ETA limits.
-   *
-   * @param {CandidatesFromMatrix} candidate - Candidate being evaluated.
-   * @returns {boolean} Whether the candidate satisfies configured limits.
-   *
-   * @example
-   * ```ts
-   * if (this.isWithinThreshold(candidate)) {
-   *   // Candidate is viable.
-   * }
-   * ```
-   */
-  private isWithinThreshold(candidate: CandidatesFromMatrix): boolean {
-    return (
-      candidate.totalDistanceMeters <= this.config.maxTotalDistanceMeters &&
-      candidate.totalEtaSeconds <= this.config.maxTotalEtaSeconds
-    );
+      await this.candidatesRepo.insertBatch(candidateEntities);
+    }
+
+    return { dispatch, candidates };
   }
 }

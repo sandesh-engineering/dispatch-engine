@@ -1,6 +1,7 @@
 import { ConnectionManager, RabbitMQService } from '@platform/queue-rabbitmq';
 import { logger } from '@platform/logger';
 import { IEventBus } from 'src/interfaces/event-bus.interface';
+import { ContextPropagation } from 'src/tracing/propagation/context';
 
 export type RabbitMQBusConfig = {
   url: string;
@@ -77,11 +78,13 @@ export class RabbitMQBus implements IEventBus {
   async publish<T = unknown>(routingKey: string, payload: T): Promise<void> {
     this.ensureConnected();
 
+    const traceCarrier = ContextPropagation.createCarrier();
+
     const published = await this.rabbitmqService!.publish(
       this.exchangeName,
       routingKey,
       payload,
-      { persistent: true },
+      { persistent: true, headers: { trace: traceCarrier } },
     );
 
     if (!published) {
@@ -105,7 +108,7 @@ export class RabbitMQBus implements IEventBus {
   async subscribe<T = unknown>(
     queue: string,
     routingKeys: string[],
-    handler: (data: T) => Promise<void>,
+    handler: (data: T, headers?: Record<string, unknown>) => Promise<void>,
   ): Promise<void> {
     this.ensureConnected();
 
@@ -143,7 +146,7 @@ export class RabbitMQBus implements IEventBus {
           queue,
         });
 
-        await handler(data);
+        await handler(data, msg.properties?.headers);
 
         svc.ack(msg);
       } catch (error) {

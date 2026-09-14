@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import { logger } from '@platform/logger';
-import { OsrmRouter } from '../router/osrm.router';
+import { withSpan, trace, context } from '@platform/tracing';
+import { ContextPropagation } from 'src/tracing/propagation/context';
 import {
   DISPATCH_COMMANDS,
   DISPATCH_EVENTS,
@@ -8,93 +9,34 @@ import {
   DispatchCreateCommand,
   DispatchAgentSelectionCommand,
   DispatchAgentAssignmentCommand,
-  DispatchCreatedEvent,
   AgentNotifiedEvent,
   AgentAssignedEvent,
   DispatchCommandPayload,
+  DispatchCreatedEvent,
 } from '../types/events';
 import { IEventBus } from 'src/interfaces/event-bus.interface';
-import { CacheService, GeoSearchResult, ICacheService } from '@platform/cache';
-import { AgentAvailabilityStatus } from '../interfaces/agent.interface';
+import { ICacheService } from '@platform/cache';
+import { EtaService } from '../services/eta-base.service';
+import { DispatchRepository } from 'src/repositories/dispatch.repository';
+import { DispatchCandidatesRepository } from 'src/repositories/dispatch-candidates.repository';
+import { DispatchConfigService } from 'src/services/dispatch-config.service';
+import { DispatchStatus } from 'src/entities/dispatch.entity';
+import { CandidateOfferStatus } from 'src/entities/dispatch-candidate.entity';
 
-const SEARCH_LEVELS = [
-  {
-    radius: 2,
-    count: 30,
-  },
-  {
-    radius: 5,
-    count: 60,
-  },
-  {
-    radius: 10,
-    count: 120,
-  },
-] as const;
-
-type NearbyAgent = {
-  member: string;
-  distance: number;
-  coordinates: {
-    longitude: number;
-    latitude: number;
-  };
-};
-
-type AgentSession = {
-  availability: AgentAvailabilityStatus;
-  // other session fields...
-};
-
-type EligibleAgent = {
-  member: string;
-  distance: number;
-  coordinates: {
-    longitude: number;
-    latitude: number;
-  };
-  session: AgentSession;
-};
-
-/**
- * Shared constant for the dispatch engine consumer queue name.
- */
 const DISPATCH_CONSUMER_QUEUE = 'dispatch-engine.commands.queue';
 
-/**
- * Command queue that listens to dispatch commands from the orchestrator,
- * computes routes via OsrmRouter, and publishes result events.
- *
- * On startup (`provision()`):
- * 1. Connects the event bus
- * 2. Asserts exchange
- * 3. Asserts queue
- * 4. Binds all dispatch command routing keys
- * 5. Starts consuming
- *
- * On each incoming message (`handleCommand()`):
- * 1. Extracts coordinates from the payload
- * 2. Calls OsrmRouter.getRoutes() to compute agent→restaurant→customer routes
- * 3. Publishes the corresponding result event (e.g. dispatch.v1.created)
- * 4. Acks the message
- */
 export class DispatchCommandQueue {
   private provisioned = false;
-  private readonly MAX_DELIVERY_AGENT_POOL = 15;
 
   constructor(
     private readonly eventBus: IEventBus,
-    private readonly router: OsrmRouter,
+    private readonly etaService: EtaService,
     private readonly cacheService: ICacheService,
-  ) {}
+    private readonly dispatchRepo: DispatchRepository,
+    private readonly candidatesRepo: DispatchCandidatesRepository,
+    private readonly configService: DispatchConfigService,
+  ) { }
 
-  /**
-   * Provision the queue: connect, assert topology, bind routing keys, and start consuming.
-   *
-   * @remarks
-   * - Idempotent: safe to call multiple times; only provisions once.
-   * - Must be called after the application bootstraps (server.start or index.ts).
-   */
   async provision(): Promise<void> {
     if (this.provisioned) {
       logger.warn('DispatchCommandQueue already provisioned — skipping');
@@ -102,11 +44,8 @@ export class DispatchCommandQueue {
     }
 
     logger.info('Provisioning DispatchCommandQueue...');
-
-    /* 1. Connect the event bus */
     await this.eventBus.connect();
 
-    /* 2. Subscribe to all dispatch command routing keys */
     const commandRoutingKeys = Object.values(DISPATCH_COMMANDS);
 
     await this.eventBus.subscribe<DispatchCommandPayload>(
@@ -124,228 +63,145 @@ export class DispatchCommandQueue {
     });
   }
 
-  /**
-   * Handle an incoming dispatch command by extracting the payload,
-   * computing routes, and publishing the appropriate result event.
-   */
-  private async handleCommand(payload: DispatchCommandPayload): Promise<void> {
-    logger.info('Processing dispatch command', {
-      type: this.resolveCommandType(payload),
-      order_id: (payload as DispatchCreateCommand).order_id,
-    });
+  private async handleCommand(
+    payload: DispatchCommandPayload,
+    headers?: Record<string, unknown>,
+  ): Promise<void> {
+    const parentContext = ContextPropagation.extractContext(
+      (headers?.trace as Record<string, unknown>) ?? {},
+    );
 
-    /* Dispatch based on the command type */
-    if (this.isCreateCommand(payload)) {
-      await this.handleCreateCommand(payload);
-    } else if (this.isAgentSelectionCommand(payload)) {
-      await this.handleAgentSelectionCommand(payload);
-    } else if (this.isAgentAssignmentCommand(payload)) {
-      await this.handleAgentAssignmentCommand(payload);
-    } else {
-      logger.warn('Unknown dispatch command payload', { payload });
-    }
+    return withSpan(
+      'Dispatch Handle Command',
+      async () => {
+        logger.info('Processing dispatch command', {
+          type: this.resolveCommandType(payload),
+          order_id: (payload as DispatchCreateCommand).order_id,
+        });
+
+        if (this.isCreateCommand(payload)) {
+          await this.handleCreateCommand(payload);
+        } else if (this.isAgentSelectionCommand(payload)) {
+          await this.handleAgentSelectionCommand(payload);
+        } else if (this.isAgentAssignmentCommand(payload)) {
+          await this.handleAgentAssignmentCommand(payload);
+        } else {
+          logger.warn('Unknown dispatch command payload', { payload });
+        }
+      },
+      parentContext,
+    );
   }
 
-  // /**
-  //  * Handle `dispatch.v1.request-creation`:
-  //  * Compute agent→restaurant→customer routes and publish `dispatch.v1.created`.
-  //  */
-  // private async handleCreateCommand(
-  //   payload: DispatchCreateCommand,
-  // ): Promise<void> {
-  //   const dispatchId = randomUUID();
-
-  //   /* Get all of the delivery agents within the 2KM radius of the restaurant and if there are none then increase the radius to 5KM and max 7KM for 3 times and if no delivery agents are there then publish the cancel event */
-  //   const nearbyDeliveryAgents = await this.getNearbyDeliveryAgents({
-  //     restaurantCoords: {
-  //       longitude: payload.restaurant_coords.longitude,
-  //       latitude: payload.restaurant_coords.latitude,
-  //     },
-  //   });
-
-  //   /* Exclude the DA's who aren't available (Filter based on CONNECTED as well as delivery agent availability status) */
-  //   const nearbyDeliveryAgentSessionData = await Promise.all(
-  //     nearbyDeliveryAgents.map((agent) =>
-  //       this.cacheService.hget(`delivery-agent:${agent.member}`),
-  //     ),
-  //   );
-
-  //   const eligibleAgents = nearbyDeliveryAgentSessionData.filter(
-  //     (agentData) =>
-  //       agentData?.availability === AgentAvailabilityStatus.AVAILABLE,
-  //   );
-
-  //   if (eligibleAgents.length < this.MAX_DELIVERY_AGENT_POOL) {
-  //     const nextBatchNearbyDeliveryAgents = await this.cacheService.geoSearch(
-  //       'location:delivery-agents',
-  //       {
-  //         longitude: payload.restaurant_coords.longitude,
-  //         latitude: payload.restaurant_coords.latitude,
-  //       },
-  //       5,
-  //       'km',
-  //       { withDist: true, withCoord: true, count: 15, sort: 'ASC' },
-  //     );
-
-  //     const nextBatchNearbyDeliveryAgentSessionData = await Promise.all(
-  //       nextBatchNearbyDeliveryAgents.map((agent) =>
-  //         this.cacheService.hget(`delivery-agent:${agent.member}`),
-  //       ),
-  //     );
-
-  //     const eligibleAgents = nextBatchNearbyDeliveryAgentSessionData.filter(
-  //       (agentData) =>
-  //         agentData?.availability === AgentAvailabilityStatus.AVAILABLE,
-  //     );
-  //   }
-
-  //   /* Compute routes (in a real scenario, deliveryAgentCoords would come from
-  //      a nearby-agent lookup service; here we use a placeholder) */
-  //   const routesResult = await Promise.allSettled(
-  //     nearbyDeliveryAgents.map((nda) =>
-  //       this.router.getRoutes({
-  //         restaurantCoords: {
-  //           longitude: payload.restaurant_coords.longitude,
-  //           latitude: payload.restaurant_coords.latitude,
-  //         },
-  //         customerCoords: {
-  //           longitude: payload.customer_coords.longitude,
-  //           latitude: payload.customer_coords.latitude,
-  //         },
-  //         deliveryAgentCoords: {
-  //           longitude: nda.coordinates.latitude,
-  //           latitude: nda.coordinates.longitude,
-  //         },
-  //       }),
-  //     ),
-  //   );
-
-  //   /* Extract ETA from OSRM response */
-  //   const agentToRestaurant = routesResult.map((routeRes) => {
-  //     if (routeRes.status === 'rejected') {
-  //       logger.warn('Failed to fetch route for delivery agent', {
-  //         reason: routeRes.reason,
-  //       });
-
-  //       return;
-  //     }
-
-  //     if (routeRes.status === 'fulfilled')
-  //       return this.extractRouteSummary(
-  //         routeRes.value.agentToRestaurantResponse,
-  //       );
-  //   });
-
-  //   const restaurantToCustomer = routesResult.map((routeRes) => {
-  //     if (routeRes.status === 'rejected') {
-  //       logger.warn('Failed to fetch route for delivery agent', {
-  //         reason: routeRes.reason,
-  //       });
-  //       return;
-  //     }
-
-  //     if (routeRes.status === 'fulfilled')
-  //       return this.extractRouteSummary(
-  //         routeRes.value.restaurantToCustomerResponse,
-  //       );
-  //   });
-
-  //   /* Now compare and find out the ETA for all of these DAs */
-  //   logger.log('Agent to restaurant', agentToRestaurant);
-  //   logger.log('Restaurant to customer', restaurantToCustomer);
-
-  //   // const event: DispatchCreatedEvent = {
-  //   //   dispatch_id: dispatchId,
-  //   //   order_id: payload.order_id,
-  //   //   agent_to_restaurant: {
-  //   //     distance_meters: agentToRestaurant.distance,
-  //   //     duration_seconds: agentToRestaurant.duration,
-  //   //     polyline: agentToRestaurant.geometry,
-  //   //   },
-  //   //   restaurant_to_customer: {
-  //   //     distance_meters: restaurantToCustomer.distance,
-  //   //     duration_seconds: restaurantToCustomer.duration,
-  //   //     polyline: restaurantToCustomer.geometry,
-  //   //   },
-  //   //   total_eta_seconds:
-  //   //     agentToRestaurant.duration + restaurantToCustomer.duration,
-  //   //   created_at: new Date().toISOString(),
-  //   // };
-
-  //   // await this.eventBus.publish(DISPATCH_EVENTS.CREATED, event);
-
-  //   // logger.info('Published dispatch.v1.created', {
-  //   //   dispatch_id: dispatchId,
-  //   //   order_id: payload.order_id,
-  //   //   total_eta_seconds: event.total_eta_seconds,
-  //   // });
-  // }
-
-  /**
-   * Handle `dispatch.v1.request-creation`.
-   *
-   * @remarks
-   * - Delegates candidate discovery, route resolution, and ETA calculation
-   *   to their respective components.
-   * - The command handler is responsible only for command-level orchestration
-   *   and dispatch event publication.
-   *
-   * @param {DispatchCreateCommand} payload - Dispatch creation command.
-   * @returns {Promise<void>} Resolves when dispatch creation processing completes.
-   *
-   * @example
-   * ```ts
-   * await this.handleCreateCommand(payload);
-   * ```
-   */
   private async handleCreateCommand(
     payload: DispatchCreateCommand,
   ): Promise<void> {
-    const dispatchId = randomUUID();
+    const restaurantCoords = {
+      longitude: payload.restaurant_coords.longitude,
+      latitude: payload.restaurant_coords.latitude,
+    };
 
-    const result = await this.etaService.calculateForDispatch({
-      restaurantCoords: {
-        longitude: payload.restaurant_coords.longitude,
-        latitude: payload.restaurant_coords.latitude,
-      },
-      customerCoords: {
-        longitude: payload.customer_coords.longitude,
-        latitude: payload.customer_coords.latitude,
-      },
+    const customerCoords = {
+      longitude: payload.customer_coords.longitude,
+      latitude: payload.customer_coords.latitude,
+    };
+
+    const { dispatch, candidates } = await this.etaService.calculateForDispatch(
+      restaurantCoords,
+      customerCoords,
+      payload.order_id,
+      payload.restaurant_id,
+    );
+
+    const activeSpan = trace.getSpan(context.active());
+    activeSpan?.setAttributes({
+      'dispatch.order_id': payload.order_id,
+      'dispatch.id': dispatch.id,
+      'dispatch.candidate_count': candidates.length,
+      'dispatch.batch_number': dispatch.currentBatch,
     });
 
-    if (result.length === 0) {
-      // Publish cancellation / no-candidate event.
+    if (candidates.length === 0) {
+      logger.warn('No eligible candidates found — dispatch creation rejected', {
+        order_id: payload.order_id,
+        dispatch_id: dispatch.id,
+      });
+
+      await this.eventBus.publish(DISPATCH_EVENTS.CREATION_REJECTED, {
+        order_id: payload.order_id,
+        reason: 'NO_ELIGIBLE_AGENTS',
+        rejected_at: new Date().toISOString(),
+      });
+
       return;
     }
 
-    // Later:
-    // rank candidates
-    // create dispatch
-    // publish dispatch.v1.created
+    /* Transition status: SEARCHING → OFFERING */
+    await this.dispatchRepo.updateStatus(
+      dispatch.id,
+      DispatchStatus.SEARCHING,
+      DispatchStatus.OFFERING,
+      { currentBatch: 1 },
+    );
+
+    const runtimeConfig = await this.configService.getConfig();
+
+    /* Select batch 1 candidates & batch-update DB (no N+1) */
+    const firstBatchCandidates = candidates.slice(0, runtimeConfig.batchSize);
+    const firstBatchDriverIds = firstBatchCandidates.map((c) => c.agent.id);
+
+    await this.candidatesRepo.updateBatchOfferStatus(
+      dispatch.id,
+      firstBatchDriverIds,
+      1,
+      CandidateOfferStatus.OFFERED,
+      { offeredAt: new Date() },
+    );
+
+    const primaryCandidate = firstBatchCandidates[0];
+
+    const event: DispatchCreatedEvent = {
+      dispatch_id: dispatch.id,
+      order_id: payload.order_id,
+      agent_to_restaurant: {
+        distance_meters: primaryCandidate
+          ? primaryCandidate.agentToRestaurant.distanceMeters
+          : 0,
+        duration_seconds: primaryCandidate
+          ? primaryCandidate.agentToRestaurant.durationSeconds
+          : 0,
+        polyline: primaryCandidate?.agentToRestaurant.geometry ?? '',
+      },
+      restaurant_to_customer: {
+        distance_meters: primaryCandidate
+          ? primaryCandidate.restaurantToCustomer.distanceMeters
+          : 0,
+        duration_seconds: primaryCandidate
+          ? primaryCandidate.restaurantToCustomer.durationSeconds
+          : 0,
+        polyline: primaryCandidate?.restaurantToCustomer.geometry ?? '',
+      },
+      total_eta_seconds: primaryCandidate ? primaryCandidate.totalEtaSeconds : 0,
+      created_at: new Date().toISOString(),
+    };
+
+    await this.eventBus.publish(DISPATCH_EVENTS.CREATED, event);
+
+    logger.info('Published dispatch.v1.created', {
+      dispatch_id: dispatch.id,
+      order_id: payload.order_id,
+      total_eta_seconds: event.total_eta_seconds,
+      batch_candidates_offered: firstBatchCandidates.length,
+    });
   }
 
-  /**
-   * Handle `dispatch.v1.request-agent-selection`:
-   * Agents are notified via external mechanism; publish `agent.v1.notified`.
-   */
   private async handleAgentSelectionCommand(
     payload: DispatchAgentSelectionCommand,
   ): Promise<void> {
-    /*
-     * In a production system, this would:
-     * 1. Query nearby delivery agents from Redis geospatial index
-     * 2. Rank them by ETA + load + rating
-     * 3. Send push notification / WebSocket to the top N agents
-     * 4. Wait for the first agent to accept
-     *
-     * For now we publish the NOTIFIED event to advance the saga.
-     */
-
     const event: AgentNotifiedEvent = {
       dispatch_id: payload.dispatch_id,
       order_id: payload.order_id,
-      agent_id: 'pending', // Resolved when agent accepts
+      agent_id: 'pending',
       notified_at: new Date().toISOString(),
     };
 
@@ -357,13 +213,39 @@ export class DispatchCommandQueue {
     });
   }
 
-  /**
-   * Handle `dispatch.v1.confirm-agent-assignment`:
-   * Confirm the agent assignment and publish `agent.v1.assigned`.
-   */
   private async handleAgentAssignmentCommand(
     payload: DispatchAgentAssignmentCommand,
   ): Promise<void> {
+    /* Idempotent transition: OFFERING/SEARCHING → ASSIGNED */
+    const updated = await this.dispatchRepo.updateStatus(
+      payload.dispatch_id,
+      [DispatchStatus.OFFERING, DispatchStatus.SEARCHING],
+      DispatchStatus.ASSIGNED,
+      {
+        assignedDriverId: payload.agent_id,
+        assignedAt: new Date(),
+      },
+    );
+
+    if (!updated) {
+      logger.info(
+        'Assignment already processed or dispatch not in OFFERING/SEARCHING status — skipping',
+        {
+          dispatch_id: payload.dispatch_id,
+          agent_id: payload.agent_id,
+        },
+      );
+      return;
+    }
+
+    await this.candidatesRepo.updateOfferStatus(
+      payload.dispatch_id,
+      payload.agent_id,
+      1,
+      CandidateOfferStatus.ACCEPTED,
+      { respondedAt: new Date() },
+    );
+
     const event: AgentAssignedEvent = {
       dispatch_id: payload.dispatch_id,
       order_id: payload.order_id,
@@ -380,12 +262,8 @@ export class DispatchCommandQueue {
     });
   }
 
-  /**
-   * Resolve the command type from the payload structure.
-   */
   private resolveCommandType(payload: DispatchCommandPayload): string {
-    if (this.isCreateCommand(payload))
-      return DISPATCH_COMMANDS.REQUEST_CREATION;
+    if (this.isCreateCommand(payload)) return DISPATCH_COMMANDS.REQUEST_CREATION;
     if (this.isAgentSelectionCommand(payload))
       return DISPATCH_COMMANDS.REQUEST_AGENT_SELECTION;
     if (this.isAgentAssignmentCommand(payload))
@@ -393,9 +271,6 @@ export class DispatchCommandQueue {
     return 'unknown';
   }
 
-  /**
-   * Type guard for DispatchCreateCommand.
-   */
   private isCreateCommand(
     payload: DispatchCommandPayload,
   ): payload is DispatchCreateCommand {
@@ -407,9 +282,6 @@ export class DispatchCommandQueue {
     );
   }
 
-  /**
-   * Type guard for DispatchAgentSelectionCommand.
-   */
   private isAgentSelectionCommand(
     payload: DispatchCommandPayload,
   ): payload is DispatchAgentSelectionCommand {
@@ -421,102 +293,9 @@ export class DispatchCommandQueue {
     );
   }
 
-  /**
-   * Type guard for DispatchAgentAssignmentCommand.
-   */
   private isAgentAssignmentCommand(
     payload: DispatchCommandPayload,
   ): payload is DispatchAgentAssignmentCommand {
     return 'agent_id' in payload;
-  }
-
-  /**
-   * Extract distance, duration, and geometry from an OSRM route response.
-   */
-  private extractRouteSummary(response: any): {
-    distance: number;
-    duration: number;
-    geometry: unknown;
-  } {
-    const route = response?.routes?.[0];
-    if (!route) {
-      logger.warn('OSRM route response missing route data', { response });
-      return { distance: 0, duration: 0, geometry: null };
-    }
-
-    return {
-      distance: Math.round(route.distance),
-      duration: Math.round(route.duration),
-      geometry: route.geometry,
-    };
-  }
-
-  /* Getting the nearby delivery agents using GEO SEARCH */
-  private async getNearbyDeliveryAgents({
-    restaurantCoords,
-  }: {
-    restaurantCoords: { longitude: number; latitude: number };
-  }) {
-    let nearbyAgents: GeoSearchResult<{
-      withDist: true;
-      withCoord: true;
-      count: number;
-      sort: 'ASC';
-    }>[] = [];
-
-    nearbyAgents = await this.cacheService.geoSearch(
-      'location:delivery-agents',
-      {
-        longitude: restaurantCoords.longitude,
-        latitude: restaurantCoords.latitude,
-      },
-      2,
-      'km',
-      { withDist: true, withCoord: true, count: 15, sort: 'ASC' },
-    );
-
-    if (nearbyAgents.length === 0) {
-      nearbyAgents = await this.cacheService.geoSearch(
-        'location:delivery-agents',
-        {
-          longitude: restaurantCoords.longitude,
-          latitude: restaurantCoords.latitude,
-        },
-        5,
-        'km',
-        { withDist: true, withCoord: true, count: 15, sort: 'ASC' },
-      );
-
-      if (nearbyAgents.length === 0) {
-        nearbyAgents = await this.cacheService.geoSearch(
-          'location:delivery-agents',
-          {
-            longitude: restaurantCoords.longitude,
-            latitude: restaurantCoords.latitude,
-          },
-          7,
-          'km',
-          { withDist: true, withCoord: true, count: 15, sort: 'ASC' },
-        );
-
-        if (nearbyAgents.length === 0) {
-          /* Publish event for cancelling the order due to DA unavailability */
-
-          logger.info(
-            'Delivery agents unavailable for order dispatch. Emitting for cancelling the order',
-            {
-              restaurantCoords,
-            },
-          );
-        }
-      }
-    }
-
-    logger.info('Available delivery agents', {
-      restaurantCoords,
-      deliveryAgentsCount: nearbyAgents.length,
-    });
-
-    return nearbyAgents;
   }
 }

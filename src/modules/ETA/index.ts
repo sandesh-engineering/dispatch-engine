@@ -4,10 +4,9 @@
  * Provides:
  * - `bootstrap` / `EtaModuleHandle` — lifecycle management (startup + graceful shutdown)
  * - `IEventBus` — common interface for internal (EventEmitter) and external (RabbitMQ) EDA
- * - `InternalEventBus` — in-process event bus for testing / local dev
  * - `RabbitMQBus` — RabbitMQ-backed event bus for production
- * - `DispatchCommandQueue` — listens for dispatch commands and computes routes/ETA
- * - `OsrmRouter` — OSRM-based route resolution with circuit breaker
+ * - `DispatchCommandQueue` — listens for dispatch commands, delegates to EtaService
+ * - `EtaService` — orchestrates candidate discovery, ranking, and route matrix resolution
  * - Event type definitions and constants
  */
 
@@ -18,7 +17,7 @@ export { IEventBus } from '../../interfaces/event-bus.interface';
 export { RabbitMQBus, RabbitMQBusConfig } from './events/rabbitmq.bus';
 export { DispatchCommandQueue } from './events/command-queue';
 
-export { OsrmRouter } from './router/osrm.router';
+export { EtaService } from './services/eta-base.service';
 export { IRouteResolutionRouter } from '../route-discovery/interfaces/router.interface';
 
 export {
@@ -36,3 +35,4 @@ export {
 } from './types/events';
 
 export { AgentAvailabilityStatus } from './interfaces/agent.interface';
+

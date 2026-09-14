@@ -1,4 +1,4 @@
-import { AgentAvailabilityStatus } from 'src/modules/ETA';
+import { AgentAvailabilityStatus } from 'src/modules/eta';
 
 export interface Coordinates {
   longitude: number;

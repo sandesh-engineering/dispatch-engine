@@ -1,7 +1,7 @@
 import { app } from './app';
 import { env } from './config/envs';
 import { logger } from '@platform/logger';
-import { bootstrap, EtaModuleHandle } from './modules/ETA';
+import { bootstrap, EtaModuleHandle } from './modules/eta';
 
 let etaModule: EtaModuleHandle | null = null;
 let isShuttingDown = false;

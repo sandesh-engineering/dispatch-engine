@@ -14,6 +14,6 @@ export interface IEventBus {
   subscribe<T = unknown>(
     queue: string,
     routingKeys: string[],
-    handler: (data: T) => Promise<void>,
+    handler: (data: T, headers?: Record<string, unknown>) => Promise<void>,
   ): Promise<void>;
 }
