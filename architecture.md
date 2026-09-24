@@ -317,10 +317,10 @@ After OSRM matrix calculation, candidates exceeding `maxTotalDistanceMeters` (de
 
 | Signal | Default Weight | Description |
 |---|---|---|
-| `rating` | 4.2 | Driver rating [0, 5] |
-| `cancellationRatio` | 2.0 | Inverted cancellation ratio |
-| `quota` | 20.0 | Inverted quota utilization |
-| `distance` | 5.0 | Inverted distance score |
+| `rating` | 0.35 | Driver rating [0, 5] |
+| `cancellationRatio` | 0.15 | Inverted cancellation ratio |
+| `quota` | 0.25 | Inverted quota utilization |
+| `distance` | 0.25 | Inverted distance score |
 
 Driver metadata (`rating`, `cancellationRatio`, `quota`) is dynamically resolved from Redis (`delivery-agent:{driverId}`) by `DriverMetadataResolver`, falling back to standard defaults if unpopulated.
 
@@ -381,3 +381,170 @@ All values read from `.env` and validated by Zod in [`src/config/envs.ts`](./src
 
 - **Shared Redis state**: Writes driver positions to `location:delivery-agents` and session data to `delivery-agent:{id}`.
 - **WebSocket notification**: `realtime-gateway` consumes notification events to send driver app WS updates.
+
+
+---
+
+
+## 11. Improvement: Movement-Aware Candidate Pre-Filtering
+
+### Problem
+
+The current candidate flow performs Redis-based candidate discovery followed by OSRM Table route resolution. OSRM is the expensive step because it evaluates the route and ETA for the shortlisted agents.
+
+A candidate may be geographically close to the restaurant but currently moving strongly away from it. Sending such candidates to OSRM can consume route-matrix capacity on agents that are unlikely to be useful.
+
+The goal of this optimization is **not to replace OSRM route resolution**, but to cheaply eliminate obviously poor candidates before making the OSRM request.
+
+### Proposed Flow
+
+The candidate pipeline can be extended as follows:
+
+```text
+Redis GEOSEARCH
+      |
+      v
+Cheap eligibility filters
+      |
+      +-- AVAILABLE?
+      +-- connected?
+      +-- location fresh?
+      +-- movement direction strongly away?
+      |
+      v
+Movement-aware candidate shortlist
+      |
+      v
+Agent ranking
+      |
+      v
+OSRM Table
+      |
+      v
+Actual route distance + ETA
+      |
+      v
+Final candidate filtering
+```
+
+### Movement Direction Signal
+
+The realtime-gateway already writes delivery-agent location state to Redis. The dispatch engine can use the current and previous location samples to derive an approximate movement vector.
+
+Required location information:
+
+```text
+current_lat
+current_lng
+previous_lat
+previous_lng
+last_location_at
+previous_location_at
+```
+
+From these values the engine can derive:
+
+```text
+movement_vector
+agent_to_restaurant_vector
+```
+
+and compare their alignment.
+
+Conceptually:
+
+```text
++1  -> strongly moving toward restaurant
+ 0  -> approximately perpendicular / uncertain
+-1  -> strongly moving away from restaurant
+```
+
+This is a **cheap heuristic**, not a replacement for route calculation.
+
+### Conservative Filtering
+
+The engine should not reject every agent that is temporarily moving away from the restaurant. Real road networks can require turns, U-turns, one-way roads, or temporary movement away from the destination.
+
+A candidate should only be removed when the evidence strongly suggests that the agent is unlikely to be useful.
+
+For example:
+
+```text
+if:
+    movement is strongly away
+    AND location is sufficiently far from restaurant
+    AND away movement persists across multiple location updates
+then:
+    exclude candidate before OSRM
+```
+
+Candidates should generally be retained when:
+
+* movement is only slightly away from the restaurant;
+* movement direction is uncertain;
+* the agent is already very close to the restaurant;
+* there are insufficient recent location samples;
+* the location data is stale or unreliable.
+
+### Traffic / Route Consideration
+
+Movement direction must not become the source of truth for ETA.
+
+For example:
+
+```text
+Agent A:
+  moving toward restaurant
+  heavy traffic
+  actual route ETA = 12 minutes
+
+Agent B:
+  currently moving away
+  can turn around / has a better route
+  actual route ETA = 5 minutes
+```
+
+Agent B should still be eligible if it survives the conservative pre-filter.
+
+Therefore:
+
+```text
+Movement direction
+       |
+       | cheap heuristic
+       v
+Candidate reduction
+       |
+       v
+OSRM
+       |
+       | authoritative route/ETA calculation
+       v
+Final candidate decision
+```
+
+### Expected Benefit
+
+This optimization reduces the number of candidates passed to OSRM without requiring an additional external routing call.
+
+For example:
+
+```text
+Redis discovery       30 candidates
+        |
+        v
+Movement pre-filter   18 candidates
+        |
+        v
+OSRM Table            18 candidates
+```
+
+Instead of sending all 30 candidates to OSRM, the engine can eliminate candidates that are clearly moving away before the expensive route-matrix calculation.
+
+The optimization is therefore primarily intended to **reduce OSRM API usage and route-resolution cost while preserving route-based ETA accuracy for candidates that remain eligible**.
+
+### Design Principle
+
+> Use cheap local signals to reduce the candidate set; use OSRM to make the actual route and ETA decision.
+
+Movement direction should remain a **pre-filtering heuristic**, not a hard source of truth for dispatch decisions.

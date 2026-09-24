@@ -23,10 +23,14 @@ import { DispatchConfigService } from 'src/services/dispatch-config.service';
 import { DispatchStatus } from 'src/entities/dispatch.entity';
 import { CandidateOfferStatus } from 'src/entities/dispatch-candidate.entity';
 
+import { IOrderServiceClient } from 'src/modules/order-service/interfaces/order-client.interface';
+import { HttpOrderServiceClient } from 'src/modules/order-service/services/http-order-client.service';
+
 const DISPATCH_CONSUMER_QUEUE = 'dispatch-engine.commands.queue';
 
 export class DispatchCommandQueue {
   private provisioned = false;
+  private readonly orderServiceClient: IOrderServiceClient;
 
   constructor(
     private readonly eventBus: IEventBus,
@@ -35,7 +39,10 @@ export class DispatchCommandQueue {
     private readonly dispatchRepo: DispatchRepository,
     private readonly candidatesRepo: DispatchCandidatesRepository,
     private readonly configService: DispatchConfigService,
-  ) { }
+    orderServiceClient?: IOrderServiceClient,
+  ) {
+    this.orderServiceClient = orderServiceClient || new HttpOrderServiceClient();
+  }
 
   async provision(): Promise<void> {
     if (this.provisioned) {
@@ -255,7 +262,15 @@ export class DispatchCommandQueue {
 
     await this.eventBus.publish(DISPATCH_EVENTS.AGENT_ASSIGNED, event);
 
-    logger.info('Published agent.v1.assigned', {
+    /* Call swappable OrderServiceClient to persist driver assignment metadata */
+    await this.orderServiceClient.assignDriver({
+      orderId: payload.order_id,
+      driverId: payload.agent_id,
+      dispatchId: payload.dispatch_id,
+      assignedAt: event.assigned_at,
+    });
+
+    logger.info('Published agent.v1.assigned and notified Order Service', {
       dispatch_id: payload.dispatch_id,
       order_id: payload.order_id,
       agent_id: payload.agent_id,

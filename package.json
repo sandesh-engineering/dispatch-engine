@@ -14,6 +14,7 @@
     "lint": "eslint src",
     "typecheck": "tsc --noEmit",
     "simulate": "ts-node -r tsconfig-paths/register src/simulation/run-dispatch.ts",
+    "seed": "ts-node -r tsconfig-paths/register src/database/seeds/seed-config.ts",
     "typeorm": "typeorm-ts-node-commonjs",
     "typeorm:migration:generate": "typeorm-ts-node-commonjs migration:generate -d src/database/data-source.ts",
     "typeorm:migration:run": "typeorm-ts-node-commonjs migration:run -d src/database/data-source.ts"

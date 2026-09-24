@@ -34,7 +34,7 @@ export const validateConfig = (config: RankingConfig): void => {
 
   const weightSum = weights.reduce((sum, weight) => sum + weight, 0);
 
-  if (Math.abs(weightSum - 1) > Number.EPSILON) {
+  if (Math.abs(weightSum - 1) > 1e-5) {
     throw new Error('Ranking weights must sum to 1');
   }
 };
