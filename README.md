@@ -24,7 +24,7 @@
 ---
 
 ## 1. System Context
-
+      
 ```
  ┌──────────────────────┐          dispatch.exchange (RabbitMQ/topic)
  │  workflow-orchestrator│ ──── dispatch.v1.request-creation ──────────────┐
